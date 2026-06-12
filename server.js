@@ -1,5 +1,6 @@
 const express = require('express');
 const path = require('path');
+const fs = require('fs');
 
 const app = express();
 const PORT = 8000;
@@ -22,13 +23,24 @@ app.post('/reverse', (req, res) => {
   res.json({ reversed });
 });
 
-// Serve static files from 'public' directory
-app.use(express.static(path.join(__dirname, 'public')));
-
-// Fallback: serve index.html for the root URL (optional, since express.static handles it)
+// Serve enhanced index.html at root with Pico.css injected
 app.get('/', (req, res) => {
-  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+  const filePath = path.join(__dirname, 'public', 'index.html');
+  fs.readFile(filePath, 'utf8', (err, data) => {
+    if (err) {
+      res.status(500).send('Internal Server Error');
+      return;
+    }
+    // Inject Pico.css link before closing head tag
+    const picoLink = '<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@1/css/pico.min.css">';
+    const modifiedHtml = data.replace('</head>', `${picoLink}\n</head>`);
+    res.setHeader('Content-Type', 'text/html');
+    res.send(modifiedHtml);
+  });
 });
+
+// Serve other static files (excluding index.html to avoid double serving)
+app.use(express.static(path.join(__dirname, 'public')));
 
 // Start server on port 8000, bind to all interfaces
 app.listen(PORT, '0.0.0.0', () => {
