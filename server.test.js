@@ -1,96 +1,115 @@
 const request = require('supertest');
-const path = require('path');
 const fs = require('fs');
 
-// Mock express to avoid binding to a real port
+jest.mock('fs');
+
+let mockApp;
+
 jest.mock('express', () => {
   const actualExpress = jest.requireActual('express');
-  const mockApp = actualExpress();
-
-  // Prevent actual listening
-  mockApp.listen = jest.fn((port, ...args) => ({ close: jest.fn() }));
-
-  // Return a mock function that behaves like express()
-  const mockExpress = jest.fn(() => mockApp);
-
-  // Forward static methods (needed by express.static, express.json, etc.)
-  mockExpress.static = actualExpress.static;
-  mockExpress.json = actualExpress.json;
-  mockExpress.response = actualExpress.response;
-  mockExpress.request = actualExpress.request;
-
-  return mockExpress;
+  return function mockExpress() {
+    mockApp = actualExpress();
+    // Override listen to avoid binding to a port
+    mockApp.listen = jest.fn((port, host, callback) => {
+      if (typeof host === 'function') {
+        callback = host;
+        host = undefined;
+      }
+      if (callback) callback();
+      return { close: jest.fn() };
+    });
+    return mockApp;
+  };
 });
 
-// Now retrieve the mock app instance
-const express = require('express');
-const app = express();
-
-// Load server – all routes/middleware will be attached to our app
+// Load the server module – this populates mockApp with all routes
 require('./server');
 
-describe('Express server', () => {
-  beforeAll(() => {
-    // Create a minimal public folder for the root / route
-    const publicDir = path.join(__dirname, 'public');
-    if (!fs.existsSync(publicDir)) {
-      fs.mkdirSync(publicDir);
-    }
-    fs.writeFileSync(
-      path.join(publicDir, 'index.html'),
-      '<html><body>Test</body></html>'
-    );
+describe('Server', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
   });
 
-  afterAll(() => {
-    // Clean up the public folder
-    const publicDir = path.join(__dirname, 'public');
-    if (fs.existsSync(publicDir)) {
-      fs.rmSync(publicDir, { recursive: true, force: true });
-    }
+  describe('GET /', () => {
+    it('should inject Pico.css link into the HTML', async () => {
+      const originalHtml = '<!DOCTYPE html><html><head><title>Test</title></head><body></body></html>';
+      fs.readFile.mockImplementationOnce((path, encoding, callback) => {
+        callback(null, originalHtml);
+      });
+
+      const response = await request(mockApp)
+        .get('/')
+        .expect('Content-Type', /html/)
+        .expect(200);
+
+      // Verify the Pico.css link appears before the closing head tag
+      expect(response.text).toContain('<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@1/css/pico.min.css">');
+      const headCloseIndex = response.text.indexOf('</head>');
+      const picoIndex = response.text.indexOf('pico.min.css');
+      expect(picoIndex).toBeLessThan(headCloseIndex);
+    });
+
+    it('should return 500 when index.html cannot be read', async () => {
+      fs.readFile.mockImplementationOnce((path, encoding, callback) => {
+        callback(new Error('file not found'), null);
+      });
+
+      await request(mockApp)
+        .get('/')
+        .expect(500, 'Internal Server Error');
+    });
   });
 
-  test('GET /health returns 200 with status ok', async () => {
-    const res = await request(app).get('/health');
-    expect(res.status).toBe(200);
-    expect(res.body).toEqual({ status: 'ok' });
+  describe('GET /health', () => {
+    it('should return 200 and status ok', async () => {
+      await request(mockApp)
+        .get('/health')
+        .expect(200, { status: 'ok' });
+    });
   });
 
-  test('POST /reverse with valid text returns reversed string', async () => {
-    const res = await request(app)
-      .post('/reverse')
-      .send({ text: 'hello' });
-    expect(res.status).toBe(200);
-    expect(res.body).toEqual({ reversed: 'olleh' });
+  describe('POST /reverse', () => {
+    it('should reverse the provided text', async () => {
+      const payload = { text: 'hello' };
+      await request(mockApp)
+        .post('/reverse')
+        .send(payload)
+        .expect(200, { reversed: 'olleh' });
+    });
+
+    it('should return 400 when text field is missing', async () => {
+      await request(mockApp)
+        .post('/reverse')
+        .send({})
+        .expect(400, { error: 'text field must be a string' });
+    });
+
+    it('should return 400 when text field is not a string', async () => {
+      const payload = { text: 123 };
+      await request(mockApp)
+        .post('/reverse')
+        .send(payload)
+        .expect(400, { error: 'text field must be a string' });
+    });
+
+    it('should reverse an empty string to an empty string', async () => {
+      const payload = { text: '' };
+      await request(mockApp)
+        .post('/reverse')
+        .send(payload)
+        .expect(200, { reversed: '' });
+    });
   });
 
-  test('POST /reverse with missing text returns 400', async () => {
-    const res = await request(app)
-      .post('/reverse')
-      .send({});
-    expect(res.status).toBe(400);
-    expect(res.body).toEqual({ error: 'text field must be a string' });
-  });
+  describe('Static file serving', () => {
+    it('should not inject CSS into non-root static requests', async () => {
+      // Since there is no file, the static middleware will return 404.
+      // The important thing is that it does not return the modified root HTML.
+      const response = await request(mockApp)
+        .get('/any-static-file.txt')
+        .expect(404);
 
-  test('POST /reverse with non-string text returns 400', async () => {
-    const res = await request(app)
-      .post('/reverse')
-      .send({ text: 12345 });
-    expect(res.status).toBe(400);
-    expect(res.body).toEqual({ error: 'text field must be a string' });
-  });
-
-  test('POST /reverse with empty string returns reversed empty string', async () => {
-    const res = await request(app)
-      .post('/reverse')
-      .send({ text: '' });
-    expect(res.status).toBe(200);
-    expect(res.body).toEqual({ reversed: '' });
-  });
-
-  test('GET / serves the index.html page', async () => {
-    const res = await request(app).get('/');
-    expect(res.status).toBe(200);
-    expect(res.text).toContain('<html>');
+      expect(response.text).not.toContain('pico.min.css');
+    });
   });
 });
